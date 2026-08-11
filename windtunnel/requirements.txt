@@ -1,0 +1,13 @@
+# Core. Nothing else is required to render a clip.
+numpy>=1.24
+scipy>=1.10        # gaussian_filter, for the turbulence patch and the symmetry breaker
+pillow>=9.0        # polygon rasterisation, HUD text, and the GIF fallback
+
+# Optional, not installed by default:
+#
+#   cupy-cuda12x   drop-in for numpy on an NVIDIA GPU. wt/gpu.py picks it up automatically
+#                  if it imports and its CUDA runtime initialises; there is no flag to set.
+#
+#   ffmpeg         NOT a Python package - a binary on PATH. Without it wt/render.py writes an
+#                  animated GIF instead of mp4, which works but is much larger and 256 colours.
+#                  Windows:  winget install Gyan.FFmpeg
