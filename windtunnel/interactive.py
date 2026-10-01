@@ -333,7 +333,8 @@ class WingTunnel:
             return
 
         remaining = self.target_rotation - self.rotation
-        if abs(remaining) > 1e-9:
+        moving = abs(remaining) > 1e-9
+        if moving:
             turn = min(FLAP_TURN_DEG_PER_FRAME, max(-FLAP_TURN_DEG_PER_FRAME, remaining))
             self.rotation += turn
             self.place_wing()
@@ -351,14 +352,18 @@ class WingTunnel:
         drag, lift = self.sim.coefficients(ref_len=self.wing.ref_chord_mm / MM_PER_CELL)
         self.drag_coefficient = drag
         self.lift_coefficient = lift
-        if np.isfinite(self.average_downforce):
-            downforce_change = self.downforce_coefficient() - self.average_downforce
-            drag_change = drag - self.average_drag
-            self.average_downforce += downforce_change * FORCE_AVERAGE_FRACTION
-            self.average_drag += drag_change * FORCE_AVERAGE_FRACTION
-        else:
-            self.average_downforce = self.downforce_coefficient()
-            self.average_drag = drag
+        # While the shape is moving the average holds still. Re-rasterising the mask every frame
+        # refills the cells the wall leaves, and that kick lands in the force integral: averaged
+        # through a DRS stroke it read a NEGATIVE drag, which is an artifact, not physics.
+        if not moving:
+            if np.isfinite(self.average_downforce):
+                downforce_change = self.downforce_coefficient() - self.average_downforce
+                drag_change = drag - self.average_drag
+                self.average_downforce += downforce_change * FORCE_AVERAGE_FRACTION
+                self.average_drag += drag_change * FORCE_AVERAGE_FRACTION
+            else:
+                self.average_downforce = self.downforce_coefficient()
+                self.average_drag = drag
         self.look.advance(self.sim)
 
     def downforce_coefficient(self):
@@ -498,7 +503,8 @@ class ThicknessTunnel:
             return
 
         remaining = self.target_thickness - self.thickness
-        if abs(remaining) > 1e-9:
+        moving = abs(remaining) > 1e-9
+        if moving:
             change = min(THICKNESS_CHANGE_PER_FRAME, max(-THICKNESS_CHANGE_PER_FRAME, remaining))
             self.thickness += change
             self.place_wing()
@@ -517,14 +523,18 @@ class ThicknessTunnel:
         drag, lift = self.sim.coefficients(ref_len=chord_cells)
         self.drag_coefficient = drag
         self.lift_coefficient = lift
-        if np.isfinite(self.average_downforce):
-            downforce_change = self.downforce_coefficient() - self.average_downforce
-            drag_change = drag - self.average_drag
-            self.average_downforce += downforce_change * FORCE_AVERAGE_FRACTION
-            self.average_drag += drag_change * FORCE_AVERAGE_FRACTION
-        else:
-            self.average_downforce = self.downforce_coefficient()
-            self.average_drag = drag
+        # While the shape is moving the average holds still. Re-rasterising the mask every frame
+        # refills the cells the wall leaves, and that kick lands in the force integral: averaged
+        # through a DRS stroke it read a NEGATIVE drag, which is an artifact, not physics.
+        if not moving:
+            if np.isfinite(self.average_downforce):
+                downforce_change = self.downforce_coefficient() - self.average_downforce
+                drag_change = drag - self.average_drag
+                self.average_downforce += downforce_change * FORCE_AVERAGE_FRACTION
+                self.average_drag += drag_change * FORCE_AVERAGE_FRACTION
+            else:
+                self.average_downforce = self.downforce_coefficient()
+                self.average_drag = drag
         self.look.advance(self.sim)
 
     def downforce_coefficient(self):
