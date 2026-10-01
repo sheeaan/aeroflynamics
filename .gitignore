@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+# numba's on-disk JIT cache
+*.nbi
+*.nbc
+# rendered clips; regenerate with `python scenes.py <scene>`
+windtunnel/out/
