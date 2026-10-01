@@ -3,7 +3,7 @@
     python tools/make_figures.py data       # run the sweeps -> docs/figures/data/*.csv (slow)
     python tools/make_figures.py plots      # CSV -> result plots, light + dark
     python tools/make_figures.py geometry   # wing anatomy, and the sections against the FIA boxes
-    python tools/make_figures.py hero       # the DRS animation (WebP)
+    python tools/make_figures.py hero       # the animations (WebP)
     python tools/make_figures.py all
 
 Nothing in a figure is typed in by hand. The plots read only the CSVs, and the CSVs hold only
@@ -874,6 +874,222 @@ def make_hero():
     print(f"  wrote {os.path.relpath(out, ROOT)}  ({count} frames, {size_mb:.1f} MB)")
 
 
+# --- "why every number is an average" animation ----------------------------------------------
+CHART_HEIGHT = 210
+CHART_BACKGROUND = (16, 17, 20)
+CHART_INK = (236, 240, 238)
+CHART_MUTED = (137, 135, 129)
+CHART_GRID = (44, 44, 42)
+TRACE_COLOUR = (57, 135, 229)        # dark-theme series 1
+MEAN_COLOUR = (217, 89, 38)          # dark-theme series 2
+FINAL_HOLD_FRAMES = 40
+
+
+def strip_chart(values, shown, low, high):
+    """The instantaneous coefficient so far, its running mean, and the axis, as an RGB array."""
+    from PIL import Image, ImageDraw
+    from wt.look import cached_font
+    image = Image.new("RGB", (HERO_WIDTH, CHART_HEIGHT), CHART_BACKGROUND)
+    draw = ImageDraw.Draw(image)
+    font = cached_font(14)
+    small = cached_font(12)
+    left, right, top, bottom = 64, HERO_WIDTH - 24, 40, CHART_HEIGHT - 34
+
+    def to_x(index):
+        return left + (right - left) * index / float(AVERAGE_FRAMES - 1)
+
+    def to_y(value):
+        return bottom - (bottom - top) * (value - low) / (high - low)
+
+    for tick in np.linspace(low, high, 5):
+        y = to_y(tick)
+        draw.line([(left, y), (right, y)], fill=CHART_GRID, width=1)
+        draw.text((left - 8, y), f"{tick:.2f}", font=small, fill=CHART_MUTED, anchor="rm")
+    draw.text((left, bottom + 18), "frame 0", font=small, fill=CHART_MUTED, anchor="lm")
+    draw.text((right, bottom + 18), f"frame {AVERAGE_FRAMES}", font=small, fill=CHART_MUTED,
+              anchor="rm")
+    draw.text((left, 16), "downforce coefficient, frame by frame", font=font, fill=CHART_INK,
+              anchor="lm")
+
+    trace = []
+    running_means = []
+    total = 0.0
+    for index in range(shown):
+        total += values[index]
+        trace.append((to_x(index), to_y(values[index])))
+        running_means.append((to_x(index), to_y(total / (index + 1))))
+    if len(trace) > 1:
+        draw.line(trace, fill=TRACE_COLOUR, width=2, joint="curve")
+        draw.line(running_means, fill=MEAN_COLOUR, width=3, joint="curve")
+    if trace:
+        x, y = trace[-1]
+        draw.ellipse([x - 4, y - 4, x + 4, y + 4], fill=TRACE_COLOUR, outline=CHART_BACKGROUND)
+        mean = total / shown
+        spread = float(np.std(values[:shown]))
+        legend_x = right - 330
+        draw.line([(legend_x, 16), (legend_x + 18, 16)], fill=TRACE_COLOUR, width=3)
+        draw.text((legend_x + 24, 16), "this frame", font=small, fill=CHART_INK, anchor="lm")
+        draw.line([(legend_x + 104, 16), (legend_x + 122, 16)], fill=MEAN_COLOUR, width=3)
+        draw.text((legend_x + 128, 16), f"running mean {mean:.2f} ± {spread:.2f}",
+                  font=small, fill=CHART_INK, anchor="lm")
+    return np.asarray(image)
+
+
+def make_averaging_animation():
+    print("Averaging animation: F1 2025, DRS closed, one 120-frame measurement ...")
+    from PIL import Image
+    tunnel = WingTunnel(scale=2)
+    settle(tunnel, SETTLE_FRAMES_AFTER_SWITCH)
+    frames = []
+    values = []
+    for _ in range(AVERAGE_FRAMES):
+        tunnel.advance()
+        values.append(tunnel.downforce_coefficient())
+        rgb = tunnel.look.frame(tunnel.sim, "speed", tunnel.polygons)
+        rgb = draw_panel(rgb, ["F1 2025 rear wing, DRS closed, held completely still",
+                               "the force still wobbles: vortices shed off the flap"],
+                         corner="tl", size=16)
+        image = Image.fromarray(rgb)
+        height = int(round(image.height * HERO_WIDTH / image.width))
+        frames.append(np.asarray(image.resize((HERO_WIDTH, height), Image.LANCZOS)))
+    margin = 0.15 * (max(values) - min(values))
+    low = min(values) - margin
+    high = max(values) + margin
+    images = []
+    for index in range(AVERAGE_FRAMES):
+        chart = strip_chart(values, index + 1, low, high)
+        images.append(Image.fromarray(np.vstack([frames[index], chart])))
+    for _ in range(FINAL_HOLD_FRAMES):
+        images.append(images[-1])
+    save_webp(images, "averaging")
+    print(f"  mean {np.mean(values):.3f}, standard deviation {np.std(values):.3f}")
+
+
+# --- how long the flow takes to forget -------------------------------------------------------
+RECOVERY_BLOCKS = 10
+RECOVERY_BLOCK_FRAMES = 150
+
+
+def chords_of_flow(tunnel, frames):
+    """How many chord lengths of freestream air pass the wing in `frames` frames."""
+    from interactive import WING_STEPS_PER_FRAME
+    chord_cells = wings.SIMPLE_WING_CHORD_MM / MM_PER_CELL
+    return frames * WING_STEPS_PER_FRAME * tunnel.sim.u0 / chord_cells
+
+
+def collect_recovery():
+    """Two controls on the thickness hysteresis.
+
+    1. Thinning from an ATTACHED state (12% -> 9%) - does shrinking the wing by itself cost
+       downforce? It is the same mask motion as the thinning branch, without the separated past.
+    2. After the 24% wing, hold the 6% wing for RECOVERY_BLOCKS x RECOVERY_BLOCK_FRAMES frames
+       and watch whether the downforce comes back, and how fast.
+    """
+    print("Recovery controls ...")
+    tunnel = ThicknessTunnel(scale=1)
+    for target in (0.06, 0.09, 0.12):
+        tunnel.set_target_thickness(target)
+        run_until_still(tunnel)
+        settle(tunnel, SETTLE_FRAMES)
+        if target == 0.09:
+            upward_nine = measure(tunnel, AVERAGE_FRAMES)
+    tunnel.set_target_thickness(0.09)
+    run_until_still(tunnel)
+    settle(tunnel, SETTLE_FRAMES)
+    thinned_nine = measure(tunnel, AVERAGE_FRAMES)
+    write_csv("shrink_control.csv", ["path_to_9pct", "downforce_mean", "downforce_std"], [
+        ["thickened from 6%", upward_nine[0], upward_nine[1]],
+        ["thinned from an attached 12%", thinned_nine[0], thinned_nine[1]]])
+    print(f"  9%: thickened {upward_nine[0]:.2f}, thinned from attached 12% {thinned_nine[0]:.2f}")
+
+    tunnel = ThicknessTunnel(scale=1)
+    tunnel.set_target_thickness(0.06)
+    run_until_still(tunnel)
+    settle(tunnel, SETTLE_FRAMES_AFTER_SWITCH)
+    before = measure(tunnel, AVERAGE_FRAMES)
+    tunnel.set_target_thickness(0.24)
+    run_until_still(tunnel)
+    settle(tunnel, SETTLE_FRAMES)
+    tunnel.set_target_thickness(0.06)
+    run_until_still(tunnel)
+    rows = [["before (never thickened)", 0.0, before[0], before[1]]]
+    for block in range(RECOVERY_BLOCKS):
+        result = measure(tunnel, RECOVERY_BLOCK_FRAMES)
+        travelled = chords_of_flow(tunnel, (block + 1) * RECOVERY_BLOCK_FRAMES)
+        rows.append([f"after 24%, block {block + 1}", travelled, result[0], result[1]])
+        print(f"  6% after 24%, up to {travelled:4.1f} chords: C_down {result[0]:.2f}")
+    write_csv("recovery.csv", ["state", "chords_of_flow", "downforce_mean", "downforce_std"], rows)
+
+
+# --- thickness morph animation ---------------------------------------------------------------
+MORPH_CAPTURE_EVERY = 4
+MORPH_HOLD_THICK_FRAMES = 120
+MORPH_RECOVERY_FRAMES = 750
+MORPH_TRAILING_MEAN = 30
+
+
+def make_thickness_animation():
+    print("Thickness animation: 6% -> 24% -> 6%, then the recovery ...")
+    from PIL import Image
+    tunnel = ThicknessTunnel(scale=2)
+    tunnel.set_target_thickness(0.06)
+    run_until_still(tunnel)
+    settle(tunnel, SETTLE_FRAMES_AFTER_SWITCH)
+    images = []
+    recent = []
+    state = {"frame": 0, "still_since": 0}
+
+    def step_and_capture(phase):
+        moving = abs(tunnel.target_thickness - tunnel.thickness) > 1e-9
+        tunnel.advance()
+        state["frame"] += 1
+        if moving:
+            recent.clear()
+            state["still_since"] = state["frame"]
+        else:
+            recent.append(tunnel.downforce_coefficient())
+            del recent[:-MORPH_TRAILING_MEAN]
+        if state["frame"] % MORPH_CAPTURE_EVERY:
+            return
+        lines = [f"Simple wing: thickness {tunnel.thickness * 100:4.1f}% of a fixed 300 mm chord",
+                 phase]
+        if moving:
+            lines.append("downforce: not shown while the shape is changing")
+        elif len(recent) == MORPH_TRAILING_MEAN:
+            travelled = chords_of_flow(tunnel, state["frame"] - state["still_since"])
+            lines.append(f"downforce C {np.mean(recent):.2f}  (mean of last {MORPH_TRAILING_MEAN} "
+                         f"frames)   {travelled:.1f} chords of air since it stopped")
+        else:
+            lines.append("downforce: averaging ...")
+        rgb = tunnel.look.frame(tunnel.sim, "speed", tunnel.polygons)
+        image = Image.fromarray(draw_panel(rgb, lines, corner="tl", size=16))
+        height = int(round(image.height * HERO_WIDTH / image.width))
+        images.append(image.resize((HERO_WIDTH, height), Image.LANCZOS))
+
+    for _ in range(60):
+        step_and_capture("attached flow at 6%")
+    tunnel.set_target_thickness(0.24)
+    while abs(tunnel.target_thickness - tunnel.thickness) > 1e-9:
+        step_and_capture("thickening ...")
+    for _ in range(MORPH_HOLD_THICK_FRAMES):
+        step_and_capture("held at 24%: the flow separates off the fat section")
+    tunnel.set_target_thickness(0.06)
+    while abs(tunnel.target_thickness - tunnel.thickness) > 1e-9:
+        step_and_capture("thinning back to 6% ...")
+    for _ in range(MORPH_RECOVERY_FRAMES):
+        step_and_capture("back at 6%: the same shape as at the start")
+    save_webp(images, "thickness_morph")
+
+
+def save_webp(images, name):
+    os.makedirs(FIGURES, exist_ok=True)
+    out = os.path.join(FIGURES, f"{name}.webp")
+    images[0].save(out, save_all=True, append_images=images[1:], duration=int(1000 / HERO_FPS),
+                   loop=0, quality=HERO_QUALITY, method=4)
+    size_mb = os.path.getsize(out) / 1e6
+    print(f"  wrote {os.path.relpath(out, ROOT)}  ({len(images)} frames, {size_mb:.1f} MB)")
+
+
 def main(argv):
     if len(argv) != 1 or argv[0] not in ("data", "plots", "geometry", "hero", "all"):
         print(__doc__)
@@ -885,6 +1101,7 @@ def main(argv):
         collect_thickness()
         collect_surface_pressure()
         collect_hysteresis()
+        collect_recovery()
     if stage in ("plots", "all"):
         make_plots()
         make_explainers()
@@ -892,6 +1109,8 @@ def main(argv):
         make_geometry()
     if stage in ("hero", "all"):
         make_hero()
+        make_averaging_animation()
+        make_thickness_animation()
     return 0
 
 
