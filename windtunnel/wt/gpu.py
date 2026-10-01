@@ -35,4 +35,4 @@ def to_device(a, dtype=_np.float32):
 
 
 def describe_backend():
-    return f"cupy (GPU)" if GPU else "numpy (CPU)"
+    return "cupy (GPU)" if GPU else "numpy (CPU)"

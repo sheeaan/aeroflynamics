@@ -43,7 +43,7 @@ from scipy.optimize import brentq
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from wt.cns import CNS, GAMMA, NG      # noqa: E402
+from wt.cns import CNS, GAMMA          # noqa: E402
 from wt.gpu import asnumpy             # noqa: E402
 
 

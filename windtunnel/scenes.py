@@ -309,7 +309,7 @@ class MachCone(Scene):
         self.mask = self._mask
 
     def hud(self, sim):
-        return [f"ogive  M {self.u0:.2f}", f"schlieren  |grad rho| / rho"]
+        return [f"ogive  M {self.u0:.2f}", "schlieren  |grad rho| / rho"]
 
 
 class MachSweep(Scene):

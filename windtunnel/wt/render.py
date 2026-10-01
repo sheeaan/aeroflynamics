@@ -31,7 +31,6 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 from . import colormap as cm
-from .gpu import asnumpy
 
 
 def ffmpeg_exe():
