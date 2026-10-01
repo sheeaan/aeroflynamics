@@ -2,6 +2,18 @@
 
 A 2-D wind tunnel: lattice-Boltzmann and compressible Navier-Stokes, polygon bodies, video out.
 
+## Why this exists
+
+I love racing. My IB Math IA was about the downforce an F1 rear wing makes, and this project
+extends it. Here a real fluid solver computes the flow, so you can watch the air that makes the
+downforce. You can also open DRS, tilt a Porsche GT3 RS flap or thicken a wing, and watch the
+numbers respond.
+
+The look is inspired by the physics animations of
+[spectrometry.mp4](https://github.com/ec175/spectrometry_public): a jet-coloured speed field,
+white streaks that trace the air, and nothing animated by hand. Parts of the solver are adapted
+from that project's open-source code; see [Credits](#credits).
+
 Nothing here is animated by hand. A scene says where a body is at time `t` — or, for the free
 bodies, only where it *started* — and then lets go. Every vortex, every separation, every shock
 on screen is the solver's output.
@@ -58,7 +70,10 @@ preview at 24 fps and a final at 60 fps are the *same animation* sampled differe
 ```
 windtunnel/
 ├── scenes.py             the compositions + CLI
+├── interactive.py        live windows: AoA, rear wings (--wings), thickness (--thickness)
 ├── wt/
+│   ├── wings.py          F1 2025 / F1 2026 / GT3 RS sections, built to the published rules
+│   ├── look.py           the spectrometry.mp4 look: jet field, comet streaks, AA bodies
 │   ├── lbm.py            D2Q9 + Smagorinsky, half-way bounce-back, forces
 │   ├── lbm_numba.py      the fused JIT kernel (40x); lbm.py falls back to numpy
 │   ├── cns.py            compressible: MUSCL/HLLC/SSP-RK2 + viscous + ghost-cell IBM
@@ -99,6 +114,202 @@ python scenes.py mach_cone --field schlieren
 python scenes.py dye_rake --orient vl --scale 3       # vertical 1080x1920
 python scenes.py karman --film crt --tracers 8000
 ```
+
+---
+
+## Interactive: rear wings and wing thickness
+
+```
+python interactive.py --wings          # F1 2025 / F1 2026 / Porsche 992 GT3 RS
+python interactive.py --thickness      # one simple wing, thickness slider
+python interactive.py --wings --selftest
+python interactive.py --thickness --selftest
+```
+
+**`--wings`** puts three real rear wings in the tunnel, one at a time. `Tab` switches wing.
+`D` opens DRS on the 2025 F1 wing, switches the 2026 F1 wing to its low-drag X-mode, or
+flattens the GT3 RS flap. Up/Down tilts the GT3 RS flap through its 34° range. `[` and `]`
+set the road speed for the Newton readout.
+
+| wing | where the geometry comes from |
+|---|---|
+| F1 2025 | FIA 2025 Technical Regulations Art. 3.10: two sections, 10–15 mm slot, DRS opens it to 85 mm |
+| F1 2026 | FIA 2026 Technical Regulations Issue 8 Art. 3.11: three sections, rear two rotate, X-mode slot ≤ 65 mm, trailing-edge angle caps 10° / 40° / 65° |
+| GT3 RS | Porsche press kit (two elements, 34° of flap travel); chords and span are a forum estimate from photos |
+
+Teams and Porsche keep their real profiles secret, so every element is a public NACA 6412 shape.
+`--wings --selftest` checks that the F1 sections meet every limit they were built to.
+
+**`--thickness`** holds one inverted NACA 44xx wing at a fixed 300 mm chord and 6° angle. A
+slider changes **only** its thickness, from 6% to 24% of the chord.
+
+### Results (averaged over 80–120 frames, 250 km/h)
+
+| wing | setting | C<sub>down</sub> | C<sub>D</sub> | downforce | drag |
+|---|---|---|---|---|---|
+| F1 2025 | DRS closed → open | 4.14 → 2.37 | 0.89 → 0.31 | 4,661 → 2,668 N | 1,002 → 349 N |
+| F1 2026 | Z-mode → X-mode | 2.33 → 0.46 | 0.46 → 0.13 | 2,580 → 509 N | 509 → 144 N |
+| GT3 RS | flap 40° → flat | 2.84 → 1.94 | 0.46 → 0.13 | 6,132 → 4,189 N | 993 → 281 N |
+
+Thickness sweep, one run stepping upward from 6%:
+
+| thickness | C<sub>down</sub> | C<sub>D</sub> | C<sub>down</sub> / C<sub>D</sub> |
+|---|---|---|---|
+| 6% | 0.58 | 0.088 | 6.6 |
+| 9% | 0.69 | 0.111 | 6.2 |
+| 12% | 0.65 | 0.127 | 5.1 |
+| 15% | 0.52 | 0.143 | 3.7 |
+| 18% | 0.46 | 0.160 | 2.9 |
+| 21% | 0.32 | 0.184 | 1.8 |
+| 24% | 0.39 | 0.214 | 1.8 |
+
+**What the thickness sweep shows**
+- **Drag rises steadily with thickness.** A thicker section blocks more air and leaves a wider
+  wake. Two separate runs agree on this.
+- **Downforce peaks near 9%, then falls.** That is real low-Reynolds-number behaviour: at
+  Re ≈ 4,500 the boundary layer is thick and separates early off a fat section. At a real car's
+  Re of about 1.4 million, thicker sections keep their flow attached far better. Treat this trend
+  as specific to this simulation.
+- **Thick sections are unsteady.** At 24% the downforce read 0.39 in this sweep but 0.87 in the
+  self-test, which jumped straight from 6%. The separated flow depends on its history, so only
+  the drag trend is solid there.
+
+---
+
+## The math
+
+### 1. The fluid: lattice-Boltzmann
+
+Instead of solving the Navier–Stokes equations directly, the lattice-Boltzmann method tracks how
+many particles move in each of 9 directions $\mathbf{c}_i$ at every grid cell (the D2Q9 model).
+Each step has two parts: particles **stream** to the neighbouring cell, then **collide**,
+relaxing toward a local equilibrium:
+
+$$f_i(\mathbf{x}+\mathbf{c}_i,\ t+1) = f_i(\mathbf{x},t) - \frac{1}{\tau}\Big(f_i(\mathbf{x},t) - f_i^{\text{eq}}(\mathbf{x},t)\Big)$$
+
+$$f_i^{\text{eq}} = w_i\,\rho\left(1 + 3\,\mathbf{c}_i\!\cdot\!\mathbf{u} + \tfrac{9}{2}(\mathbf{c}_i\!\cdot\!\mathbf{u})^2 - \tfrac{3}{2}\,|\mathbf{u}|^2\right)$$
+
+Density and velocity are sums over the 9 directions:
+
+$$\rho = \sum_i f_i, \qquad \rho\,\mathbf{u} = \sum_i \mathbf{c}_i f_i$$
+
+The relaxation time $\tau$ sets the viscosity, $\nu = (\tau - \tfrac12)/3$, so choosing a
+Reynolds number fixes $\tau$:
+
+$$\mathrm{Re} = \frac{U L}{\nu} \quad\Rightarrow\quad \tau = \frac{3\,U L}{\mathrm{Re}} + \frac12$$
+
+For the wing tunnel, $U = 0.075$ (grid cells per step), $L = 160$ cells (400 mm) and
+$\mathrm{Re} = 6000$. That gives $\nu = 0.002$ and $\tau = 0.506$. With $\tau$ this close to
+$\tfrac12$, plain LBM becomes unstable, so a Smagorinsky turbulence model adds viscosity where
+the flow shears hardest: $\nu_t = (C_s\Delta)^2\,|S|$ with $C_s = 0.16$.
+
+LBM is only accurate at low Mach number. Here $\mathrm{Ma} = U/c_s = 0.075\sqrt3 = 0.13$,
+so the compressibility error, which scales like $\mathrm{Ma}^2$, is about 1.7%.
+
+### 2. From grid units to the real world
+
+One cell is $\Delta x = 2.5$ mm. Lift and drag coefficients have no units, so the grid's speed
+never has to equal the car's speed: the real speed only enters at the end, through the dynamic
+pressure. For the record, one solver step at 250 km/h stands for
+
+$$\Delta t = \frac{\Delta x \cdot U_{\text{grid}}}{V_{\text{real}}} = \frac{0.0025 \times 0.075}{69.4} \approx 2.7\ \mu\text{s}$$
+
+### 3. Measuring the force on the wing
+
+Walls use **bounce-back**: a particle that would enter the wing is sent back the way it came.
+Each bounce reverses its momentum, and the wing absorbs the difference. Summing over every link
+$(\mathbf{x}, i)$ that crosses the wing surface gives the total force (momentum exchange):
+
+$$\mathbf{F} = \sum_{\text{boundary links}} \mathbf{c}_i\,\big(f_i^{*}(\mathbf{x}) + f_{\bar i}(\mathbf{x})\big)$$
+
+Here $f_i^{*}$ is the population heading into the wall after collision, and $f_{\bar i}$ is the
+one bounced back. The code checks this against a second, independent method (see
+[Validation](#validation)). The first version gave a drag 3× too high that looked perfectly
+believable.
+
+### 4. Coefficients, then Newtons
+
+$$C_D = \frac{F_x}{\tfrac12 \rho U^2 c}, \qquad C_{\text{down}} = -\,\frac{F_y}{\tfrac12 \rho U^2 c}$$
+
+$c$ is the wing's streamwise length in grid cells. The minus sign is there because a rear wing
+pushes **down**. Converting to Newtons uses the real air density, road speed $V$, chord and
+span $b$:
+
+$$D = C_{\text{down}} \cdot \tfrac12\,\rho_{\text{air}}\,V^2 \cdot c\,b$$
+
+Worked example: the F1 2025 wing, DRS closed, 250 km/h:
+
+$$V = \frac{250}{3.6} = 69.4\ \text{m/s}, \qquad q = \tfrac12 (1.225)(69.4)^2 = 2954\ \text{Pa}$$
+
+$$D = 4.14 \times 2954 \times (0.397 \times 0.960) = 4661\ \text{N} \approx 475\ \text{kg}$$
+
+Because $D \propto V^2$, doubling the speed quadruples the downforce.
+
+### 5. The wing shapes
+
+Every section is a NACA 4-digit airfoil. With $x$ running from 0 to 1 along the chord, the
+thickness either side of the camber line is
+
+$$y_t = 5t\left(0.2969\sqrt{x} - 0.1260\,x - 0.3516\,x^2 + 0.2843\,x^3 - 0.1036\,x^4\right)$$
+
+The camber line $y_c$ is two parabolas that meet at the point of maximum camber $p$:
+
+$$y_c = \begin{cases} \dfrac{m}{p^2}\left(2px - x^2\right) & x < p \\[2mm] \dfrac{m}{(1-p)^2}\left((1-2p) + 2px - x^2\right) & x \ge p \end{cases}$$
+
+The thickness is applied perpendicular to the camber line, with $\theta = \arctan(dy_c/dx)$:
+
+$$x_u = x - y_t\sin\theta,\quad y_u = y_c + y_t\cos\theta, \qquad x_l = x + y_t\sin\theta,\quad y_l = y_c - y_t\cos\theta$$
+
+Each section is then flipped ($z \to -z$, so it pushes down instead of up), rotated by its angle
+$\alpha$, and scaled to its chord:
+
+$$\begin{pmatrix} x' \\ z' \end{pmatrix} = c \begin{pmatrix} \cos\alpha & -\sin\alpha \\ \sin\alpha & \cos\alpha \end{pmatrix} \begin{pmatrix} x \\ -y \end{pmatrix}$$
+
+**Why the thickness slider never changes the size.** The thickness $t$ only appears as the
+factor in front of $y_t$. Chord, camber and angle don't depend on it. The cross-section area
+does grow in proportion to $t$:
+
+$$A = c^2 \int_0^1 2\,y_t\,dx = 10\,t\,c^2\left(\tfrac{2}{3}(0.2969) - \tfrac{0.1260}{2} - \tfrac{0.3516}{3} + \tfrac{0.2843}{4} - \tfrac{0.1036}{5}\right) \approx 0.681\,t\,c^2$$
+
+For the 300 mm wing, that is 37 cm² at 6% and 147 cm² at 24%.
+
+**Fitting the rules.** The FIA rules fix gaps and angles, not positions, so the code solves for
+the positions. The slot gap $g$ is the shortest distance between two outlines, using
+point-to-segment distances. Then **bisection** finds the value that hits each target:
+
+- the height $h$ that puts the flap exactly $g(h) = 12$ mm above the main plane;
+- the rotation $\varphi$ that opens DRS to $g(\varphi) = 84$ mm (the rule allows 85);
+- for 2026, the angle at which the steepest underside tangent in the last 40 mm sits 1° under
+  each cap.
+
+Bisection halves the search interval each step. 60 steps narrow an initial 160 mm range to
+$160 / 2^{60} \approx 10^{-16}$ mm.
+
+### 6. The streaks
+
+Each of ~12,000 tracer particles moves with the local flow, stepped with the second-order
+midpoint method (RK2):
+
+$$\mathbf{x}_{n+1} = \mathbf{x}_n + \Delta t\;\mathbf{u}\!\left(\mathbf{x}_n + \tfrac{\Delta t}{2}\,\mathbf{u}(\mathbf{x}_n)\right)$$
+
+Each white tail is traced **backward** from the particle through the current velocity field,
+22 samples long, and fades along its length. The colour shows how fast the air moves; the
+tails show which way.
+
+### 7. What the numbers do and don't mean
+
+| | this simulation | real car |
+|---|---|---|
+| dimensions | 2-D slice | 3-D wing with endplates |
+| Reynolds number | ~4,500–6,400 | ~1.4–2 million |
+| tunnel walls | up to ~25% blockage | open road |
+
+At this low Reynolds number the boundary layer is far thicker than on a real wing, which costs
+downforce. Being 2-D ignores tip losses, and the walls squeeze the flow; both of those add
+downforce. The two errors pull in opposite directions, so the size of the net error is unknown.
+For comparison, the 2-D GT3 RS wing alone reads ~625 kg at 250 km/h. Porsche quotes 860 kg for
+the **whole car** at 285 km/h, which scales by $V^2$ to ~662 kg at 250 km/h. **Trends** are the
+trustworthy output: which way DRS, flap angle or thickness moves downforce and drag.
 
 ---
 
@@ -146,7 +357,7 @@ python tools/shock_check.py
 | `sod_check` | exact Sod shock tube — wave speeds, plateaus, no overshoot |
 | `shock_check` | immersed boundary vs the exact oblique-shock relation |
 
-Latest full run — **12/12**, plus Sod 3/3:
+Latest full run — **14/14**, plus Sod 3/3:
 
 | | measured | reference |
 |---|---|---|
@@ -233,3 +444,7 @@ under the MIT licence. Its full text is in [`LICENSES/`](LICENSES/spectrometry_p
 |---|---|
 | `wt/cns.py` | the compressible solver, adapted |
 | `wt/lbm.py` | parts of the lattice-Boltzmann solver |
+| `wt/look.py` | the jet / vorticity palettes and the streak constants; the code is a rewrite |
+
+The rest is this project's own: the force validation and the bug it caught, the scenes, the
+interactive modes, the FIA-rule wing geometry, the thickness study, and the math write-up.
