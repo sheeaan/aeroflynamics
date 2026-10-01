@@ -24,6 +24,16 @@ Controls:  Tab                              next wing
            Up / Down, or the mouse wheel    GT3 RS upper element, 2 deg per press
            [  ]                             road speed for the Newton readout
            1  2  3  4                       speed / vorticity / pressure / Q-criterion
+
+THICKNESS MODE (`--thickness`): one inverted NACA 44xx at a fixed 300 mm chord and 6 deg rake.
+A slider changes ONLY its thickness, 6-24% of chord, and the HUD reads downforce and drag.
+
+    python interactive.py --thickness
+    python interactive.py --thickness --selftest
+
+Controls:  slider                           thickness, % of chord
+           [  ]                             road speed for the Newton readout
+           1  2  3  4                       speed / vorticity / pressure / Q-criterion
 """
 from __future__ import annotations
 
@@ -427,6 +437,171 @@ class WingWindow(Window):
             self.tunnel.nudge_flap(-GT3RS_STEP_DEG)
 
 
+# --- thickness mode -------------------------------------------------------------------------
+# The slider jumps; the section follows at this rate. 0.1% of a 300 mm chord is 0.3 mm, an
+# eighth of a cell, so the mask never steps by a whole cell between frames.
+THICKNESS_CHANGE_PER_FRAME = 0.001
+THICKNESS_DEFAULT = 0.12
+THICKNESS_CONTROLS = ["slider: thickness (chord fixed)", "[ ] speed",
+                      "1 speed  2 vort  3 pressure  4 Q"]
+
+
+class ThicknessTunnel:
+    """One inverted NACA 44xx at fixed chord and rake. Only its thickness can change."""
+
+    def __init__(self, scale=2):
+        self.sim = LBM(WING_NX, WING_NY, u0=WING_U0, re=WING_RE,
+                       ref_len=WING_RE_LENGTH_MM / MM_PER_CELL, csm=0.16)
+        self.sim.set_inlet_turbulence(WING_TURBULENCE,
+                                      length=WING_RE_LENGTH_MM / MM_PER_CELL * 0.12)
+        self.sim.perturb(amp=0.03)
+        self.look = Look(WING_NX, WING_NY, scale, WING_STEPS_PER_FRAME)
+
+        self.thickness = THICKNESS_DEFAULT
+        self.target_thickness = THICKNESS_DEFAULT
+        self.road_speed_kmh = ROAD_SPEED_DEFAULT_KMH
+        self.field = "speed"
+        self.drag_coefficient = float("nan")
+        self.lift_coefficient = float("nan")
+        self.average_downforce = float("nan")
+        self.average_drag = float("nan")
+        self.diverged_message = None
+        self.polygons = None
+        self.frames_since_change = 0
+
+        self.place_wing()
+        self.sim.run(WING_SETTLE_STEPS)
+
+    def place_wing(self):
+        """Mid-chord pinned to a fixed lattice point, so thickening grows the section in place."""
+        outline = wings.simple_wing_mm(self.thickness)
+        angle = np.radians(wings.SIMPLE_WING_ANGLE_DEG)
+        mid_chord_x = 0.5 * wings.SIMPLE_WING_CHORD_MM * np.cos(angle)
+        mid_chord_z = 0.5 * wings.SIMPLE_WING_CHORD_MM * np.sin(angle)
+        lattice = np.empty_like(outline)
+        lattice[:, 0] = WING_NX * WING_CENTRE_X_FRACTION + (outline[:, 0] - mid_chord_x) / MM_PER_CELL
+        lattice[:, 1] = WING_NY * 0.5 - (outline[:, 1] - mid_chord_z) / MM_PER_CELL
+        self.polygons = [lattice]
+        self.sim.set_solid(shapes.rasterize(self.polygons, WING_NX, WING_NY))
+        self.frames_since_change = 0
+
+    def set_target_thickness(self, fraction):
+        clamped = min(wings.SIMPLE_WING_MAX_THICKNESS, max(wings.SIMPLE_WING_MIN_THICKNESS, fraction))
+        self.target_thickness = clamped
+
+    def nudge_speed(self, delta_kmh):
+        new_speed = self.road_speed_kmh + delta_kmh
+        self.road_speed_kmh = min(ROAD_SPEED_MAX_KMH, max(ROAD_SPEED_MIN_KMH, new_speed))
+
+    def advance(self):
+        if self.diverged_message is not None:
+            return
+
+        remaining = self.target_thickness - self.thickness
+        if abs(remaining) > 1e-9:
+            change = min(THICKNESS_CHANGE_PER_FRAME, max(-THICKNESS_CHANGE_PER_FRAME, remaining))
+            self.thickness += change
+            self.place_wing()
+
+        self.sim.run(WING_STEPS_PER_FRAME)
+        self.frames_since_change += 1
+
+        health = self.sim.health()
+        if not np.isfinite(health) or health > self.sim.health_limit:
+            self.diverged_message = (f"DIVERGED: max|u| = {health:.3f} > "
+                                     f"{self.sim.health_limit}. Restart.")
+            print(self.diverged_message, file=sys.stderr)
+            return
+
+        chord_cells = wings.SIMPLE_WING_CHORD_MM / MM_PER_CELL
+        drag, lift = self.sim.coefficients(ref_len=chord_cells)
+        self.drag_coefficient = drag
+        self.lift_coefficient = lift
+        if np.isfinite(self.average_downforce):
+            downforce_change = self.downforce_coefficient() - self.average_downforce
+            drag_change = drag - self.average_drag
+            self.average_downforce += downforce_change * FORCE_AVERAGE_FRACTION
+            self.average_drag += drag_change * FORCE_AVERAGE_FRACTION
+        else:
+            self.average_downforce = self.downforce_coefficient()
+            self.average_drag = drag
+        self.look.advance(self.sim)
+
+    def downforce_coefficient(self):
+        return -self.lift_coefficient
+
+    def to_newtons(self, coefficient):
+        """Coefficient -> force per metre of span at the chosen road speed."""
+        speed = self.road_speed_kmh / 3.6
+        dynamic_pressure = 0.5 * AIR_DENSITY * speed * speed
+        area = (wings.SIMPLE_WING_CHORD_MM / 1000.0) * (wings.SIMPLE_WING_SPAN_MM / 1000.0)
+        return coefficient * dynamic_pressure * area
+
+    def frame(self):
+        rgb = self.look.frame(self.sim, self.field, self.polygons)
+
+        chord = wings.SIMPLE_WING_CHORD_MM
+        own_re = WING_RE * chord / WING_RE_LENGTH_MM
+        lines = [f"Simple wing: inverted NACA 44xx, chord {chord:.0f} mm, "
+                 f"{wings.SIMPLE_WING_ANGLE_DEG:.0f} deg rake",
+                 f"thickness {self.thickness * 100:4.1f}% of chord = "
+                 f"{self.thickness * chord:4.1f} mm"]
+        if abs(self.target_thickness - self.thickness) > 1e-9:
+            lines.append(f"changing to {self.target_thickness * 100:4.1f}% ...")
+        elif self.frames_since_change < READOUT_SETTLE_FRAMES:
+            lines.append("settling - readout still reacting to the change")
+        if np.isfinite(self.average_downforce):
+            downforce = self.to_newtons(self.average_downforce)
+            drag = self.to_newtons(self.average_drag)
+            lines.append(f"downforce  C {self.average_downforce:+.2f}   {downforce:6,.0f} N/m   avg")
+            lines.append(f"drag       C {self.average_drag:+.3f}   {drag:6,.0f} N/m   avg")
+            if self.average_drag > 1e-6:
+                lines.append(f"downforce / drag   {self.average_downforce / self.average_drag:5.1f}")
+        lines.append(f"at {self.road_speed_kmh:.0f} km/h, per metre of span")
+        lines.append(f"2-D, Re {own_re:,.0f} (real ~{self.real_reynolds():.1e}): scaled, NOT real")
+        lines.append(f"field: {self.field}")
+        if self.diverged_message is not None:
+            lines.append(self.diverged_message)
+        rgb = draw_panel(rgb, lines, corner="tl")
+        rgb = draw_panel(rgb, THICKNESS_CONTROLS, corner="bl", size=13)
+        if self.field == "speed":
+            rgb = draw_speed_legend(rgb, f"{self.road_speed_kmh * 2.20:.0f} km/h")
+        return rgb
+
+    def real_reynolds(self):
+        kinematic_viscosity_air = 1.5e-5
+        speed = self.road_speed_kmh / 3.6
+        return speed * (wings.SIMPLE_WING_CHORD_MM / 1000.0) / kinematic_viscosity_air
+
+
+class ThicknessWindow(Window):
+    """The usual frame, plus a thickness slider under it."""
+
+    def __init__(self, tunnel, title):
+        super().__init__(tunnel, title)
+        self.slider = tkinter.Scale(self.root, from_=wings.SIMPLE_WING_MIN_THICKNESS * 100,
+                                    to=wings.SIMPLE_WING_MAX_THICKNESS * 100, resolution=0.5,
+                                    orient=tkinter.HORIZONTAL, length=tunnel.look.width - 40,
+                                    label="thickness, % of chord (chord stays 300 mm)",
+                                    command=self.on_slider)
+        self.slider.set(THICKNESS_DEFAULT * 100)
+        self.slider.pack()
+
+    def on_slider(self, value):
+        self.tunnel.set_target_thickness(float(value) / 100.0)
+
+    def on_key(self, event):
+        if event.keysym == "bracketright":
+            self.tunnel.nudge_speed(+ROAD_SPEED_STEP_KMH)
+        elif event.keysym == "bracketleft":
+            self.tunnel.nudge_speed(-ROAD_SPEED_STEP_KMH)
+        elif event.char in WING_FIELD_KEYS:
+            self.tunnel.field = WING_FIELD_KEYS[event.char]
+
+    def on_wheel(self, event):
+        """The wheel does nothing here; the slider is the only geometry control."""
+
+
 # --- self-test ------------------------------------------------------------------------------
 def report(name, passed, detail):
     if passed:
@@ -590,6 +765,71 @@ def selftest_wings():
     return 1
 
 
+def measured_thickness_mm(outline):
+    """Largest distance across the section, measured perpendicular to its chord line."""
+    angle = np.radians(wings.SIMPLE_WING_ANGLE_DEG)
+    normal_x = -np.sin(angle)
+    normal_z = np.cos(angle)
+    across = outline[:, 0] * normal_x + outline[:, 1] * normal_z
+    along = outline[:, 0] * np.cos(angle) + outline[:, 1] * np.sin(angle)
+    widest = 0.0
+    for station in np.linspace(0.05, 0.95, 91) * wings.SIMPLE_WING_CHORD_MM:
+        near = np.abs(along - station) < 3.0
+        if near.sum() >= 2:
+            widest = max(widest, float(across[near].max() - across[near].min()))
+    return widest
+
+
+def selftest_thickness():
+    results = []
+
+    # Behaviour 1: the slider changes thickness and nothing else.
+    chord_ok = True
+    thickness_ok = True
+    details = []
+    for fraction in (wings.SIMPLE_WING_MIN_THICKNESS, 0.12, wings.SIMPLE_WING_MAX_THICKNESS):
+        outline = wings.simple_wing_mm(fraction)
+        chord = float(np.hypot(*(outline[0] - outline[wings.PROFILE_LEADING_EDGE_INDEX])))
+        thickness = measured_thickness_mm(outline)
+        expected = fraction * wings.SIMPLE_WING_CHORD_MM
+        if abs(chord - wings.SIMPLE_WING_CHORD_MM) > 0.5:
+            chord_ok = False
+        if abs(thickness - expected) > 0.05 * expected:
+            thickness_ok = False
+        details.append(f"{fraction * 100:.0f}%: chord {chord:.1f} mm, thick {thickness:.1f} mm")
+    results.append(report("thickness slider changes thickness, never chord",
+                          chord_ok and thickness_ok, "; ".join(details)))
+
+    # End to end: the thinnest and thickest sections, settled and averaged. Drag must rise with
+    # thickness - more frontal blockage and a thicker wake - and every frame must render.
+    print("selftest: settling the thickness tunnel ...")
+    tunnel = ThicknessTunnel(scale=1)
+    measured = []
+    frame_ok = True
+    for fraction in (wings.SIMPLE_WING_MIN_THICKNESS, wings.SIMPLE_WING_MAX_THICKNESS):
+        tunnel.set_target_thickness(fraction)
+        while abs(tunnel.target_thickness - tunnel.thickness) > 1e-9:
+            tunnel.advance()
+        mean_over_frames(tunnel, 150)
+        downforce, drag = mean_over_frames(tunnel, 120)
+        measured.append((fraction, downforce, drag))
+        if tunnel.frame().shape != (WING_NY, WING_NX, 3):
+            frame_ok = False
+    thin = measured[0]
+    thick = measured[1]
+    stable = tunnel.diverged_message is None
+    results.append(report("thicker section makes more drag",
+                          stable and thick[2] > thin[2],
+                          f"{thin[0] * 100:.0f}%: C_d {thin[2]:+.3f}, C_down {thin[1]:+.2f}; "
+                          f"{thick[0] * 100:.0f}%: C_d {thick[2]:+.3f}, C_down {thick[1]:+.2f}"))
+    results.append(report("thickness tunnel renders a full frame", frame_ok,
+                          f"{WING_NX}x{WING_NY}"))
+
+    if all(results):
+        return 0
+    return 1
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -597,12 +837,23 @@ def main(argv=None):
     parser.add_argument("--selftest", action="store_true", help="run the checks, no window")
     parser.add_argument("--wings", action="store_true",
                         help="F1 2025 / F1 2026 / GT3 RS rear wings instead of the NACA 2412")
+    parser.add_argument("--thickness", action="store_true",
+                        help="one simple wing with a thickness slider (chord fixed)")
     args = parser.parse_args(argv)
 
+    if args.thickness and args.selftest:
+        return selftest_thickness()
     if args.wings and args.selftest:
         return selftest_wings()
     if args.selftest:
         return selftest()
+    if args.thickness:
+        print(f"backend: {describe_backend()}")
+        print("settling ...")
+        thickness_tunnel = ThicknessTunnel(scale=args.scale)
+        print(thickness_tunnel.sim.describe())
+        ThicknessWindow(thickness_tunnel, "windtunnel - wing thickness").run()
+        return 0
     if args.wings:
         print(f"backend: {describe_backend()}")
         print("settling ...")

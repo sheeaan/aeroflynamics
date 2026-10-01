@@ -17,9 +17,13 @@ from PIL import Image, ImageDraw
 # --- profile generators, unit chord -------------------------------------------------
 
 
-def naca4(code="2412", n=160, closed_te=True):
+def naca4(code="2412", n=160, closed_te=True, thickness=None):
     """NACA 4-digit section. `code` = MPXX: M = max camber (% chord), P = its position
     (tenths of chord), XX = thickness (% chord).
+
+    `thickness`, a fraction of chord, overrides XX when given. It exists for a CONTINUOUS
+    thickness: XX is whole percent, and a slider stepping 1% at a time moves the surface of a
+    120-cell chord by more than a cell per step. Camber and chord are untouched by it.
 
     Points use COSINE SPACING, which clusters them toward the leading edge. That is not
     cosmetic: the curvature there is extreme, and uniform spacing either under-resolves the
@@ -28,7 +32,10 @@ def naca4(code="2412", n=160, closed_te=True):
     code = str(code).zfill(4)
     m = int(code[0]) / 100.0
     p = int(code[1]) / 10.0
-    t = int(code[2:]) / 100.0
+    if thickness is None:
+        t = int(code[2:]) / 100.0
+    else:
+        t = float(thickness)
 
     beta = np.linspace(0.0, np.pi, int(n))
     x = 0.5 * (1.0 - np.cos(beta))

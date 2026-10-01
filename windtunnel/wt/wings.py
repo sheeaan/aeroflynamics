@@ -342,3 +342,20 @@ def build_gt3rs():
 def build_all():
     return [build_f1_2025(), build_f1_2026(), build_gt3rs()]
 
+
+# --- the simple wing (thickness study) -------------------------------------------------------
+# One inverted NACA 44xx section: 4% camber at 40% chord, held at a fixed chord and rake while
+# ONLY the thickness changes. Chord, camber and angle are typical of a single-element rear wing,
+# not taken from any car.
+SIMPLE_WING_CODE = "4412"            # the last two digits are overridden by the slider
+SIMPLE_WING_CHORD_MM = 300.0
+SIMPLE_WING_ANGLE_DEG = 6.0
+SIMPLE_WING_SPAN_MM = 1000.0         # forces are quoted per metre of span
+SIMPLE_WING_MIN_THICKNESS = 0.06
+SIMPLE_WING_MAX_THICKNESS = 0.24
+
+
+def simple_wing_mm(thickness_fraction):
+    """Outline in mm, leading edge at the origin. Thickness changes; chord does not."""
+    unit = shapes.naca4(SIMPLE_WING_CODE, thickness=thickness_fraction)
+    return inverted_outline(unit, SIMPLE_WING_CHORD_MM, 0.0, 0.0, SIMPLE_WING_ANGLE_DEG)
