@@ -23,11 +23,12 @@ the wing and measures the force that airflow produces.
   GT3 RS flat flap removes about half of each.
 - **The GT3 RS flap trades steadily.** From flat to full tilt, downforce and drag both rise
   smoothly, each by about 2.5–3×.
-- **Wings remember.** The same flap angle or thickness gives a different force depending on the
-  direction you arrived from. Thinning a wing back down from 24% thickness recovered almost none of
-  its downforce: at 21% it measured 0.38 on the way up and 0.0 on the way down.
-- **At this scale, thin wins.** With the chord fixed, drag grows with thickness, and on the way
-  up downforce peaks at about 9% thickness.
+- **Changing a wing's shape disturbs its flow for a surprisingly long time.** After the 24% wing
+  thins back to 6%, its downforce starts at 0.21 and needs about 5 chord lengths of passing air to
+  return to its original 0.66. Measure sooner than that and the answer depends on which way the
+  shape changed, which can look like the wing "remembering".
+- **At this scale, thin wins.** With the chord fixed, drag grows with thickness, and downforce is
+  highest for the thinnest sections.
 - **Two independent force measurements agree.** Adding up the pressure around the wing reproduces
   the solver's downforce within 4%, and shows that about half of the drag is skin friction.
 
@@ -192,9 +193,19 @@ wobbles. Every data point therefore follows the same protocol:
 3. Record the instantaneous coefficients for **120 frames** and report their **mean** and
    **standard deviation**.
 
-The standard deviation measures the flow's own unsteadiness, not instrument noise. Each sweep
-runs **both ways** (up, then back down) in one continuous simulation, so any dependence on
-history shows up directly.
+The standard deviation measures the flow's own unsteadiness, not instrument noise. The animation
+below is one complete measurement: the wing never moves, yet the force wobbles as vortices shed
+off the flap, and only the running mean settles.
+
+<p align="center">
+  <img src="docs/figures/averaging.webp" width="760"
+       alt="The F1 2025 wing held still in the tunnel, with a strip chart underneath plotting the instantaneous downforce coefficient over 120 frames. It wobbles between about 3.6 and 4.4 while the running mean settles at 3.95 plus or minus 0.24.">
+</p>
+
+Each sweep runs **both ways** (up, then back down) in one continuous simulation, so any
+dependence on history shows up directly. Each point allows about 1–2 chord lengths of air to pass.
+A control experiment in §5 shows that after a large shape change the flow needs about 5, so
+points measured right after the wing *thinned* are not fully settled.
 
 ## 4. Results
 
@@ -296,28 +307,44 @@ depending on the direction of travel. Drag grows with it, so the downforce-to-dr
 between about 4.1 and 6.4 at every angle measured. The flap is a dial for how much of both you
 want, not a free lunch.
 
-**The flow has a memory (hysteresis).** At high angles, the GT3 RS made more downforce when
-flattening from 40° than when tilting up to the same angle: 3.17 against 2.80 at 40°. The
-thickness sweep shows it far more strongly. Once the 24% section's flow had separated, thinning
-the wing did not reattach it: at 21% the downforce was 0.38 on the way up and 0.0 on the way down.
-A likely reason: separated flow is self-sustaining, because the recirculating region shields
-itself from the fast outer flow that would reattach it. The same mechanism makes real wings
-stall at one angle and recover only at a lower one. Each point here allowed about 1–2 chord
-lengths of air to pass; whether these states would recover given much longer is an open question.
-
-The averaged flow shows the difference directly. I re-ran the sweep's path to reach the 21% wing
-from both directions, and the hysteresis reproduced: $C_{\text{down}}$ was 0.39 on the way up and
-0.07 on the way down. Coming from below, the reversed flow is a thin layer hugging the rear of
-the underside. Coming from above, it has grown into a large recirculating eddy behind the
-trailing edge, and the downforce falls with it.
+**The flow takes time to forget.** Both sweeps gave different forces depending on the direction
+of travel. At 40° the GT3 RS read 3.17 when flattening and 2.80 when tilting up. At 21% thickness
+the simple wing read 0.38 on the way up and about 0.0 on the way down. I re-ran the sweep's path
+to the 21% wing and it reproduced: 0.39 against 0.07. The averaged flow shows the difference.
+Coming from below, the reversed flow is a thin layer hugging the rear of the underside. Coming
+from above, it has grown into a large recirculating eddy behind the trailing edge, and the
+downforce falls with it.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/figures/hysteresis.dark.png">
   <img src="docs/figures/hysteresis.light.png" alt="Time-averaged flow around the 21 percent thick wing in two states. Reached by thickening: a thin region of reversed flow along the rear underside. Reached by thinning: a large recirculating eddy behind the trailing edge.">
 </picture>
 
-**Why thin wins here.** On the way up, downforce peaks near 9% thickness and then falls, while
-drag climbs steadily. At this simulation's Reynolds number (≈ 4,500), the boundary layer is thick
+Is this true **hysteresis**, two stable flows for the same shape, or a slow recovery that the
+protocol cut short? Two control experiments separate the possibilities:
+
+| control | result |
+|---|---|
+| after the 24% wing, hold the 6% wing still | $C_{\text{down}}$ 0.21 after about 1 chord length of air, 0.47 after 2, 0.58 after 3, 0.66 after 6, matching the 0.67 it had before it was ever thickened |
+| thin a wing whose flow never separated, 12% → 9% | 0.45, against 0.67 for the same 9% wing reached by thickening |
+
+The flow recovers completely, and even thinning a wing that never separated costs downforce for
+a while. So the direction-dependence in the sweeps is mainly the flow still settling after a
+shape change: each point allowed about 1–2 chord lengths of air, and a full recovery takes about
+5. Real stall hysteresis is well documented for wings, but this study cannot separate it from slow
+recovery. Measuring it properly needs a much longer wait at every point. The animation shows the
+whole sequence:
+
+<p align="center">
+  <img src="docs/figures/thickness_morph.webp" width="760"
+       alt="The simple wing thickens from 6 to 24 percent, the flow separates, the wing thins back to 6 percent, and a large disturbance washes downstream while the downforce readout climbs back from about 0.3 to about 0.6.">
+</p>
+
+<p align="center"><sub>The chord never changes, only the thickness. Downforce is shown only while
+the shape is still, as the mean of the last 30 frames.</sub></p>
+
+**Why thin wins here.** On the way up, downforce falls from about 0.7 at 6–9% thickness to 0.33
+at 24%, while drag climbs steadily. At this simulation's Reynolds number (≈ 4,500), the boundary layer is thick
 and separates early off a fat section. At a real car's Reynolds number (≈ 1.4 million) the
 boundary layer is far thinner, and thicker sections keep their flow attached much better. So this
 trend is a property of small, slow, viscous flow, not a design rule for race cars.
@@ -337,6 +364,7 @@ values as order-of-magnitude; the **trends and comparisons** are the result.
 | surroundings | free stream, tunnel walls up to ~25% blockage | car body, rear tyres, open road |
 | profiles | public NACA 6412 / 44xx stand-ins | proprietary sections |
 | resolution | 2.5 mm cells, so a 12 mm slot is ~5 cells wide | — |
+| settling | ~1–2 chord lengths of air per point; ~5 needed after a large shape change | — |
 
 ## 7. Validation
 
