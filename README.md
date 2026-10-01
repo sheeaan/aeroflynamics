@@ -28,6 +28,8 @@ the wing and measures the force that airflow produces.
   its downforce: at 21% it measured 0.38 on the way up and 0.0 on the way down.
 - **At this scale, thin wins.** With the chord fixed, drag grows with thickness, and on the way
   up downforce peaks at about 9% thickness.
+- **Two independent force measurements agree.** Adding up the pressure around the wing reproduces
+  the solver's downforce within 4%, and shows that about half of the drag is skin friction.
 
 ---
 
@@ -53,6 +55,19 @@ around it. So the question "how does shape change downforce?" is really "how doe
 $C_{\text{down}}$ and $C_D$?". Answering that needs the flow itself.
 
 Because $D \propto V^2$, doubling the speed quadruples the downforce, at any shape.
+
+A rear wing is an aircraft wing mounted upside down. Its curved underside makes the air there
+travel faster, and faster air is at lower pressure. The air above pushes down harder than the air
+below pushes up, and that difference is the downforce. Most racing wings split the wing into a
+**main plane** and one or more **flaps**, with a narrow **slot** between them. The slot lets each
+element start its own fresh, thin boundary layer, and the flap's suction helps the main plane's
+flow leave its trailing edge cleanly. Together the elements can turn the air more sharply than
+one piece could without the flow breaking away (A. M. O. Smith, *High-Lift Aerodynamics*, 1975).
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/anatomy.dark.png">
+  <img src="docs/figures/anatomy.light.png" alt="Labelled cross-section of the F1 2025 rear wing: main plane, flap, slot gap, leading and trailing edges, chord line, camber line, the angle between chord and airflow, the pressure side on top, the suction side underneath, and the net downforce.">
+</picture>
 
 ## 3. Method
 
@@ -219,6 +234,51 @@ $$q = \tfrac12 (1.225)\left(\tfrac{250}{3.6}\right)^2 = 2954\ \text{Pa}, \qquad 
   <img src="docs/figures/thickness.light.png" alt="Downforce and drag coefficient against thickness from 6 to 24 percent of chord, swept up then down.">
 </picture>
 
+### 4.4 Where the downforce comes from
+
+The force measured in §3.3 is one number for the whole wing. Pressure shows *where* on the wing
+it comes from. The plot below is the time-averaged pressure coefficient
+
+$$C_p = \frac{p - p_\infty}{\tfrac12 \rho U^2}$$
+
+along both surfaces of the simple wing at 12% thickness. Negative $C_p$ is suction, and it is
+plotted upward, the usual convention in aerodynamics.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/surface_pressure.dark.png">
+  <img src="docs/figures/surface_pressure.light.png" alt="Pressure coefficient along the chord of the simple wing: strong suction on the underside peaking near the leading edge, mild pressure on the top, with the area between the two curves shaded.">
+</picture>
+
+The downforce is concentrated near the front: the first third of the chord provides 59% of it.
+More surprising, the **underside does all of the work**. Its suction provides 116% of the net
+downforce. Averaged along the chord, the top surface sits slightly *below* freestream pressure,
+so it pulls up a little (−16%). This split between top and bottom depends on the reference
+pressure $p_\infty$; the total does not, because a constant pressure all round a closed shape adds
+up to zero force.
+
+The force is the pressure added up all the way around the wing's outline, which is a contour
+integral:
+
+$$\mathbf{F}_{\text{pressure}} = -\oint p\,\mathbf{n}\,ds$$
+
+Here $\mathbf{n}$ is the outward unit normal and $ds$ a short piece of the outline. Measured
+perpendicular to the chord, this is the area between the two curves:
+
+$$C_N = \int_0^1 \big(C_{p,\text{top}} - C_{p,\text{underside}}\big)\,d\!\left(\tfrac{x}{c}\right)$$
+
+This gives an **independent check** on the force measurement. The two methods share nothing:
+one counts particles bouncing off the wall, the other adds up pressure around the outline.
+
+| | momentum exchange (§3.3) | pressure integral | difference |
+|---|---|---|---|
+| downforce, $C_{\text{down}}$ | 0.544 | 0.522 | 4% |
+| drag, $C_D$ | 0.113 | 0.054 | — |
+
+The downforce agrees within 4%. The drag does not, and it should not: pressure is only half of
+drag. The other half is **skin friction**, the air dragging along the surface, which acts along
+the wall and so is invisible to a pressure integral. At this Reynolds number, friction makes up
+about 53% of this wing's drag.
+
 Every number above comes from [`docs/figures/data/`](docs/figures/data), written by the solver.
 
 ## 5. Discussion
@@ -244,6 +304,17 @@ A likely reason: separated flow is self-sustaining, because the recirculating re
 itself from the fast outer flow that would reattach it. The same mechanism makes real wings
 stall at one angle and recover only at a lower one. Each point here allowed about 1–2 chord
 lengths of air to pass; whether these states would recover given much longer is an open question.
+
+The averaged flow shows the difference directly. I re-ran the sweep's path to reach the 21% wing
+from both directions, and the hysteresis reproduced: $C_{\text{down}}$ was 0.39 on the way up and
+0.07 on the way down. Coming from below, the reversed flow is a thin layer hugging the rear of
+the underside. Coming from above, it has grown into a large recirculating eddy behind the
+trailing edge, and the downforce falls with it.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/hysteresis.dark.png">
+  <img src="docs/figures/hysteresis.light.png" alt="Time-averaged flow around the 21 percent thick wing in two states. Reached by thickening: a thin region of reversed flow along the rear underside. Reached by thinning: a large recirculating eddy behind the trailing edge.">
+</picture>
 
 **Why thin wins here.** On the way up, downforce peaks near 9% thickness and then falls, while
 drag climbs steadily. At this simulation's Reynolds number (≈ 4,500), the boundary layer is thick
@@ -283,6 +354,9 @@ The force measurement in §3.3 was caught being 3× too large by comparing it wi
 independent method (a control-volume momentum balance). The cause was a mismatch between the wall
 boundary condition and its force sum. The fix was to make them the same scheme, not to scale the
 answer. The full story is in [`windtunnel/README.md`](windtunnel/README.md#why-the-validation-harness-exists).
+
+The surface-pressure integral in §4.4 is a third, independent method. It agrees with the force
+measurement on downforce within 4%.
 
 The wing geometry has its own checks. `interactive.py --wings --selftest` verifies every FIA limit
 the F1 sections were built to, and that opening each wing lowers both downforce and drag.
